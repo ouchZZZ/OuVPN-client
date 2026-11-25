@@ -12,8 +12,8 @@ android {
         minSdk 26
         ndk { abiFilters 'arm64-v8a' }
         targetSdk 34
-        versionCode 3
-        versionName '1.1.0'
+        versionCode 8
+        versionName '1.2.4'
     }
 
     buildTypes {
@@ -44,35 +44,13 @@ android {
     }
 }
 
-// Verified release archive; the executable is extracted by Android into nativeLibraryDir.
-def singBoxVersion = '1.14.4'
-def singBoxArchive = "sing-box-${singBoxVersion}-android-arm64.tar.gz"
-def singBoxSha256 = 'fb3a6c5197f4044f82c8fd75e01ce14c28b6abdd4c3df84bb987d41a962a320f'
-def singBoxRoot = layout.buildDirectory.dir('generated/singbox')
-def prepareSingBox = tasks.register('prepareSingBox') {
-    inputs.property('releaseSha256', singBoxSha256)
-    def exe = singBoxRoot.map { it.file('jni/arm64-v8a/libsingbox.so') }
+// Built from a verified upstream source module with the app-private Android TUN hook.
+def nativeSources = rootProject.file('native/direct-tun')
+def prepareSingBox = tasks.register('prepareSingBox', Exec) {
+    inputs.files(new File(nativeSources, 'build.py'), new File(nativeSources, 'receive_android.go'))
+    def exe = layout.buildDirectory.file('generated/singbox/jni/arm64-v8a/libsingbox.so')
     outputs.file(exe)
-    doLast {
-        def dir = singBoxRoot.get().asFile
-        dir.mkdirs()
-        def archive = new File(dir, singBoxArchive)
-        if (!archive.exists()) {
-            ant.get(src: "https://github.com/SagerNet/sing-box/releases/download/v${singBoxVersion}/${singBoxArchive}", dest: archive, retries: 2)
-        }
-        def digest = java.security.MessageDigest.getInstance('SHA-256')
-        archive.withInputStream { input ->
-            byte[] buffer = new byte[65536]
-            for (int count = input.read(buffer); count > 0; count = input.read(buffer)) digest.update(buffer, 0, count)
-        }
-        if (digest.digest().encodeHex().toString() != singBoxSha256) {
-            throw new GradleException('sing-box archive checksum mismatch; remove the generated archive and retry.')
-        }
-        def binary = tarTree(resources.gzip(archive)).matching { include '**/sing-box' }.singleFile
-        def destination = exe.get().asFile
-        destination.parentFile.mkdirs()
-        java.nio.file.Files.copy(binary.toPath(), destination.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-    }
+    commandLine 'python3', new File(nativeSources, 'build.py').absolutePath, exe.get().asFile.absolutePath
 }
 
 tasks.named('preBuild').configure { dependsOn(prepareSingBox) }

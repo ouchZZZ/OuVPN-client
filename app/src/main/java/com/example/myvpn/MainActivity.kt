@@ -48,7 +48,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var nav: LinearLayout
     private lateinit var scroll: ScrollView
 
-    companion object { private var wgConfig: Config? = null }
+    private var wgConfig: Config? = null
+    private var wgLoadFailed = false
+    private val reports = mutableMapOf<EgressMode, RouteReport>()
 
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { render() }
 
@@ -78,8 +80,15 @@ class MainActivity : AppCompatActivity() {
             if (config.peers.singleOrNull()?.endpoint?.isPresent != true || config.getInterface().addresses.isEmpty()) {
                 show("Нужен клиентский WireGuard-конфиг с адресом и одним peer с Endpoint.")
             } else {
+                val previous = withContext(Dispatchers.IO) {
+                    SavedVpnState.saveConfig(applicationContext, config)
+                    runCatching { SavedVpnState.loadReport(applicationContext, config) }.getOrNull()
+                }
                 wgConfig = config
-                show("Конфиг WireGuard импортирован для текущего сеанса.")
+                wgLoadFailed = false
+                reports.remove(EgressMode.HOME)
+                if (previous != null) reports[EgressMode.HOME] = previous
+                show("Конфиг WireGuard сохранён на устройстве.")
             }
         }
     }
@@ -94,15 +103,38 @@ class MainActivity : AppCompatActivity() {
         })
         drawNav()
         scope.launch { MyVpnService.status.collect { if (screen == Screen.HOME || screen == Screen.NODES) render() } }
-        scope.launch { MyVpnService.report.collect { if (screen == Screen.HOME || screen == Screen.NODES) render() } }
-        scope.launch { SubscriptionRepository.changed.collect {
-            try {
-                subscriptions = withContext(Dispatchers.IO) { SubscriptionRepository.list(applicationContext) }
-                loaded = true
-            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
-            catch (_: Exception) { message = "Не удалось прочитать подписки. Данные не изменены." }
-            if (screen != Screen.APPS) render()
-        } }
+        scope.launch {
+            // Ignore any replay from a previous activity; history was already written to disk.
+            var previous = MyVpnService.report.value
+            MyVpnService.report.collect { latest ->
+                if (latest == null || latest === previous) return@collect
+                previous = latest
+                reports[latest.egress] = latest
+                if (screen == Screen.HOME || screen == Screen.NODES) render()
+            }
+        }
+        scope.launch {
+            val restored = withContext(Dispatchers.IO) {
+                val config = runCatching { SavedVpnState.loadConfig(applicationContext) }
+                val histories = listOfNotNull(
+                    runCatching { SavedVpnState.loadReport(applicationContext, null) }.getOrNull(),
+                    config.getOrNull()?.let { runCatching { SavedVpnState.loadReport(applicationContext, it) }.getOrNull() },
+                )
+                config to histories
+            }
+            wgConfig = restored.first.getOrNull()
+            wgLoadFailed = restored.first.isFailure
+            if (restored.first.isFailure) message = "Не удалось прочитать сохранённый конфиг WireGuard. Можно импортировать его заново."
+            restored.second.forEach { reports.putIfAbsent(it.egress, it) }
+            SubscriptionRepository.changed.collect {
+                try {
+                    subscriptions = withContext(Dispatchers.IO) { SubscriptionRepository.list(applicationContext) }
+                    loaded = true
+                } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+                catch (_: Exception) { message = "Не удалось прочитать подписки. Данные не изменены." }
+                if (screen != Screen.APPS) render()
+            }
+        }
         runCatching { SubscriptionRefreshJob.schedule(this) }
         render()
     }
@@ -124,7 +156,7 @@ class MainActivity : AppCompatActivity() {
         val offset = if (reset) 0 else scroll.scrollY
         page.removeAllViews()
         val title = when (screen) {
-            Screen.HOME -> "ДОМАШНИЙ ТУННЕЛЬ" to getString(R.string.app_name)
+            Screen.HOME -> (if (egress() == EgressMode.HOME) "ДОМАШНИЙ ТУННЕЛЬ" else "VPN ЧЕРЕЗ НОДУ") to getString(R.string.app_name)
             Screen.NODES -> "МАРШРУТЫ" to "Ноды"
             Screen.SUBS -> "ИСТОЧНИКИ" to "Подписки"
             Screen.APPS -> "РАЗДЕЛЕНИЕ ТРАФИКА" to "Приложения вне VPN"
@@ -143,7 +175,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun renderHome() {
         val state = MyVpnService.status.value
-        val report = MyVpnService.report.value
+        val report = reports[egress()] ?: RouteReport(egress = egress())
+        val ready = loaded && !busy && !blockedWireGuard() && (egress() == EgressMode.HOME ||
+            subscriptions.any { sub -> sub.nodes.any(SingBoxConfig::supportsNodeTunnel) })
+        val canConnect = ready && (egress() == EgressMode.HOME || Build.VERSION.SDK_INT >= 29)
         val mode = when (state.mode) {
             MyVpnService.Mode.AUTO -> "АВТОРЕЖИМ"
             MyVpnService.Mode.MANUAL -> "РУЧНОЙ МАРШРУТ"
@@ -153,30 +188,48 @@ class MainActivity : AppCompatActivity() {
             addView(label(mode, 11f, R.color.ou_mint, true).apply { letterSpacing = 0.12f })
             addView(label(state.text, 21f, bold = true))
             if (state.busy) addView(ProgressBar(this@MainActivity, null, android.R.attr.progressBarStyleHorizontal).apply { isIndeterminate = true })
-            state.routeKey?.let { report.home[it] }?.let { addView(label("Последний замер · ${format(it)}", 13f, R.color.ou_dim)) }
+            val speeds = if (state.egress == EgressMode.HOME) report.home else report.outer
+            state.routeKey?.let { speeds[it] }?.let { addView(label("Последний замер · ${format(it)}", 13f, R.color.ou_dim)) }
         })
         if (state.active || state.busy) page.addView(button(if (state.active) "Отключить" else "Остановить", primary = true) {
             stopService(Intent(this, MyVpnService::class.java))
-        }) else page.addView(button("Подключиться", wgConfig != null && loaded && !busy, primary = true) { connect(MyVpnService.Mode.AUTO) })
+        }) else page.addView(button("Подключиться", canConnect, primary = true) { connect(MyVpnService.Mode.AUTO) })
         if (state.active && state.mode == MyVpnService.Mode.MANUAL && !state.busy) {
             page.addView(button("Перейти в авторежим") { connect(MyVpnService.Mode.AUTO) })
         }
-        page.addView(button("Проверить VPN", wgConfig != null && loaded && !state.busy && !busy, click = ::fullCheck))
-        page.addView(button(if (wgConfig == null) "Импортировать WireGuard .conf" else "Заменить WireGuard .conf", !state.active && !state.busy && !busy) {
+        page.addView(button("Проверить VPN", (state.active || ready) && !state.busy && !busy, click = ::fullCheck))
+        page.addView(CheckBox(this).apply {
+            text = "Домашний WireGuard поверх подписок"
+            isChecked = homeEnabled()
+            isEnabled = !state.active && !state.busy && !busy
+            setOnCheckedChangeListener { _, checked ->
+                settings.edit().putBoolean("homeEnabled", checked).apply()
+                render()
+            }
+        })
+        if (blockedWireGuard()) page.addView(label("Не удалось прочитать конфиг WireGuard. Импортируй его заново или выключи WireGuard.", 13f, R.color.ou_dim))
+        else if (homeEnabled() && wgConfig == null) page.addView(label("Конфиг не загружен — используется режим через ноду.", 13f, R.color.ou_dim))
+        if (egress() == EgressMode.NODE && Build.VERSION.SDK_INT < 29) page.addView(label("Подключение через ноду требует Android 10+. Замер скорости доступен отдельно.", 13f, R.color.ou_dim))
+        page.addView(button(if (wgConfig == null) "Импортировать WireGuard .conf" else "Заменить WireGuard .conf", loaded && !state.active && !state.busy && !busy) {
             importConfig.launch(arrayOf("*/*"))
         })
         if (notificationsMissing()) page.addView(button("Включить статус в шторке") { notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS) })
-        report.best?.let { page.addView(label("Лучший по проверке: ${it.label}", 14f, R.color.ou_dim)) }
+        val nodes = subscriptions.flatMap { it.namedNodes() }
+        RouteHistory.best(report, nodes, egress())?.let {
+            page.addView(label("Лучший по проверке: ${it.node?.name ?: "WireGuard напрямую"}", 14f, R.color.ou_dim))
+        }
     }
 
     private fun renderNodes() {
         val state = MyVpnService.status.value
-        val metrics = MyVpnService.report.value
-        val enabled = wgConfig != null && !busy && !state.busy
-        val nodes = subscriptions.flatMap { it.namedNodes() }.distinctBy { it.link }.sortedWith(compareByDescending<ProxyNode> {
-            metrics.home[it.link]?.downloadMbps ?: -1.0
-        }.thenByDescending { metrics.outer[it.link]?.downloadMbps ?: -1.0 }.thenBy { it.name })
-        for (route in listOf(HomeRoute()) + nodes.map { HomeRoute(it) }) {
+        val metrics = reports[egress()] ?: RouteReport(egress = egress())
+        val home = egress() == EgressMode.HOME
+        val enabled = loaded && !busy && !state.busy && !blockedWireGuard() && (home || Build.VERSION.SDK_INT >= 29)
+        val candidates = subscriptions.flatMap { it.namedNodes() }.distinctBy { it.link }.sortedBy { it.name }
+        val scores = if (home) metrics.home else metrics.outer
+        val ranked = RoutePolicy.ranked(candidates.mapNotNull { node -> scores[node.link]?.let { node to it } }.toMap())
+        val nodes = ranked + (candidates - ranked.toSet())
+        for (route in (if (home) listOf(HomeRoute()) else emptyList()) + nodes.map { HomeRoute(it) }) {
             val node = route.node
             val key = route.key
             val protocol = when (node?.protocol) { "vless" -> "VLESS / XUDP"; "hysteria2" -> "HYSTERIA 2"; else -> "БЕЗ НОДЫ" }
@@ -186,12 +239,17 @@ class MainActivity : AppCompatActivity() {
                 if (node != null) addView(label(when {
                     metrics.outer[key] != null -> "Нода: ${format(checkNotNull(metrics.outer[key]))}"
                     metrics.ping[key] != null -> "Нода: ответила за ${metrics.ping[key]} мс · нет замера скорости"
-                    metrics.ping.containsKey(key) -> "Нода: не ответила за 1,5 с"
+                    metrics.ping.containsKey(key) -> "Нода: не прошла проверку за 1,5 с"
+                    metrics.outer.containsKey(key) -> "Нода: не удалось измерить скорость"
                     else -> "Нода: не проверена"
                 }, 13f, R.color.ou_dim))
-                val speed = metrics.home[key]
-                addView(label(if (speed != null) "Через дом: ${format(speed)}" else if (metrics.home.containsKey(key)) "Через дом: тест не прошёл" else "Через дом: не проверено", 13f, R.color.ou_dim))
-                addView(button("Выбрать вручную", enabled) { connect(MyVpnService.Mode.MANUAL, route) })
+                if (home) {
+                    val speed = metrics.home[key]
+                    addView(label(if (speed != null) "Через дом: ${format(speed)}" else if (metrics.home.containsKey(key)) "Через дом: тест не прошёл" else "Через дом: не проверено", 13f, R.color.ou_dim))
+                }
+                val supported = home || (node != null && SingBoxConfig.supportsNodeTunnel(node))
+                if (!supported) addView(label("Профиль ноды не поддерживается в режиме без WireGuard.", 13f, R.color.ou_dim))
+                addView(button("Выбрать вручную", enabled && supported) { connect(MyVpnService.Mode.MANUAL, route) })
             })
         }
         if (nodes.isEmpty()) page.addView(label("Добавь подписку Happ, чтобы появились ноды.", 14f, R.color.ou_dim))
@@ -289,9 +347,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun exclusions() = settings.getStringSet("excluded", emptySet()).orEmpty().toSet()
+    private fun homeEnabled() = settings.getBoolean("homeEnabled", false)
+    private fun blockedWireGuard() = homeEnabled() && wgLoadFailed
+    private fun egress() = EgressMode.resolve(homeEnabled(), wgConfig != null)
 
     private fun connect(mode: MyVpnService.Mode, route: HomeRoute? = null) {
-        val config = wgConfig ?: return
+        if (blockedWireGuard()) return
+        val config = wgConfig.takeIf { egress() == EgressMode.HOME }
+        if (config == null && mode != MyVpnService.Mode.TEST && Build.VERSION.SDK_INT < 29) return
         val selection = MyVpnService.Selection(config, mode, route, exclusions())
         val intent = if (mode == MyVpnService.Mode.TEST) null else VpnService.prepare(this)
         if (intent == null) startTunnel(selection) else {
@@ -354,7 +417,7 @@ class MainActivity : AppCompatActivity() {
         setOnClickListener { click() }
     }
     private fun show(value: String) { message = value; render() }
-    private fun format(s: NodeSpeed) = "↓ ${number(s.downloadMbps)} · ↑ ${s.uploadMbps?.let(::number) ?: "—"} Мбит/с · ${s.latencyMs} мс"
+    private fun format(s: NodeSpeed) = "↓ ${number(s.downloadMbps)} · ↑ ${s.uploadMbps?.let(::number) ?: "—"} Мбит/с · до первого байта ${s.latencyMs} мс"
     private fun number(value: Double) = String.format(Locale.getDefault(), "%.1f", value)
     private fun Int.dp(): Int = (this * resources.displayMetrics.density + 0.5f).toInt()
     override fun onDestroy() { scope.cancel(); super.onDestroy() }

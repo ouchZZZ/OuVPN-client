@@ -16,7 +16,7 @@ internal class VpnSession(
     private val publish: (MyVpnService.Status) -> Unit,
     private val report: (RouteReport) -> Unit,
     private val stop: () -> Unit,
-) : AutoCloseable {
+) : VpnController {
     private val backend by lazy { GoBackend(context) }
     private var relay: LocalWireGuardRelay? = null
     private var transport: RouteTransport? = null
@@ -38,13 +38,13 @@ internal class VpnSession(
         override fun onStateChange(newState: Tunnel.State) = Unit
     }
 
-    fun run(request: MyVpnService.Selection?, fullCheck: Boolean) {
+    override fun run(request: MyVpnService.Selection?, fullCheck: Boolean) {
         lastNotice = null
         try {
             if (fullCheck) {
                 val probe = tester ?: return
                 val original = connected
-                try { scan(probe, exhaustive = true) }
+                try { scan(probe, exhaustive = true, includeUpload = true) }
                 finally {
                     if (original != null && !Thread.currentThread().isInterrupted) restore(original)
                 }
@@ -54,18 +54,18 @@ internal class VpnSession(
             }
             checkNotNull(request)
             if (request.mode == MyVpnService.Mode.TEST) {
-                val probe = RouteTester(context, request.config)
-                scan(probe, exhaustive = true)
+                val probe = RouteTester(context, checkNotNull(request.config))
+                scan(probe, exhaustive = true, includeUpload = true)
                 publish(MyVpnService.Status(false, "Полная проверка завершена"))
                 stop()
                 return
             }
             if (relay == null) startTunnel(request)
             // When a tunnel already exists, keep its validated profile and app routes until a user reconnects.
-            check(imported === request.config) { "WireGuard profile changed" }
+            check(imported == request.config) { "WireGuard profile changed" }
             mode = request.mode
             pinned = if (mode == MyVpnService.Mode.MANUAL) request.route else null
-            if (mode == MyVpnService.Mode.AUTO) choose()
+            if (mode == MyVpnService.Mode.AUTO) connectAuto()
             else {
                 val route = checkNotNull(pinned)
                 show("Подключаем WireGuard ${route.label}…", true)
@@ -86,7 +86,7 @@ internal class VpnSession(
     }
 
     private fun startTunnel(request: MyVpnService.Selection) {
-        val input = request.config
+        val input = checkNotNull(request.config)
         val source = input.getInterface()
         val sourcePeer = input.peers.single()
         val local = LocalWireGuardRelay()
@@ -113,7 +113,7 @@ internal class VpnSession(
         } catch (error: Exception) { local.close(); throw error }
     }
 
-    fun onNetworkChanged() {
+    override fun onNetworkChanged() {
         if (relay == null) return
         val current = connectivity.activeNetwork ?: return
         if (network == current) return
@@ -145,7 +145,7 @@ internal class VpnSession(
         catch (_: Exception) { stable() }
     }
 
-    fun health() {
+    override fun health() {
         if (relay == null) return
         if (backend.getState(tunnel) != Tunnel.State.UP) { stop(); return }
         val age = SystemClock.elapsedRealtime() - routeAt
@@ -156,9 +156,29 @@ internal class VpnSession(
         } else stable()
     }
 
-    private fun choose(knownDirect: Pair<HomeRoute, NodeSpeed?>? = null) {
+    private fun connectAuto() {
+        val config = checkNotNull(imported)
+        val history = runCatching { SavedVpnState.loadReport(context, config) }.getOrDefault(RouteReport())
+        val nodes = SubscriptionRepository.list(context).flatMap { it.namedNodes() }
+        val cached = RouteHistory.best(history, nodes, EgressMode.HOME)
+        RouteHistory.tryCached(cached, { route ->
+            show("Короткая проверка последнего лучшего маршрута…", true)
+            val speed = sample(route, light = true)
+            val ready = speed != null && speed.downloadMbps >= RoutePolicy.SLOW_MBPS &&
+                NodeSurvey.attempt { restore(route); true } == true
+            if (ready) {
+                retryAfter = SystemClock.elapsedRealtime() + 90_000
+                stable()
+            } else {
+                report(RouteReport(home = mapOf(route.key to null)))
+            }
+            ready
+        }, { choose(exhaustive = true); connected })
+    }
+
+    private fun choose(knownDirect: Pair<HomeRoute, NodeSpeed?>? = null, exhaustive: Boolean = false) {
         retryAfter = SystemClock.elapsedRealtime() + 90_000
-        val outcome = try { scan(checkNotNull(tester), exhaustive = false, knownDirect) }
+        val outcome = try { scan(checkNotNull(tester), exhaustive, knownDirect) }
             finally { retryAfter = SystemClock.elapsedRealtime() + 90_000 }
         val best = outcome.best
         if (best == null) {
@@ -171,13 +191,13 @@ internal class VpnSession(
         stable()
     }
 
-    private fun scan(probe: RouteTester, exhaustive: Boolean, knownDirect: Pair<HomeRoute, NodeSpeed?>? = null): RouteReport {
+    private fun scan(probe: RouteTester, exhaustive: Boolean, knownDirect: Pair<HomeRoute, NodeSpeed?>? = null, includeUpload: Boolean = false): RouteReport {
         var paused = false
         val nodes = SubscriptionRepository.list(context).flatMap { it.namedNodes() }
         val result = probe.scan(nodes, isWifi(), exhaustive, { route ->
             if (!paused) { suspendPackets(); paused = true }
-            probe.home(route)
-        }, { text -> show(text, true) }, knownDirect)
+            probe.home(route, includeUpload = includeUpload)
+        }, { text -> show(text, true) }, knownDirect, includeUpload)
         report(result)
         return result
     }

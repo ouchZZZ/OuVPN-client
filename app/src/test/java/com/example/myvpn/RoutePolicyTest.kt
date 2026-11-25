@@ -25,10 +25,18 @@ class RoutePolicyTest {
         assertEquals(listOf(8, 7, 6, 5, 4), RoutePolicy.shortlist(candidates))
     }
 
-    @Test fun nearTiesPreferUploadWhileASlowButWorkingRouteCanStillWin() {
-        assertEquals("upload", RoutePolicy.ranked(mapOf("down" to score(5.0, 1.0), "upload" to score(4.9, 3.0))).first())
+    @Test fun belowTenOnlyDownloadSpeedMatters() {
+        assertEquals("down", RoutePolicy.ranked(mapOf("down" to score(5.0, 1.0, 2000), "upload" to score(4.9, 3.0, 500))).first())
         assertEquals("slow", RoutePolicy.ranked(mapOf("slow" to score(0.6))).first())
     }
 
-    private fun score(down: Double, up: Double = 1.0) = NodeSpeed(down, up, 30)
+    @Test fun onceSpeedIsSufficientLatencyBreaksCloseSpeedDifferences() {
+        assertEquals(listOf("very-fast", "responsive", "slower-response", "under-threshold"), RoutePolicy.ranked(mapOf(
+            "slower-response" to score(30.0, ms = 2000), "responsive" to score(28.0, ms = 500),
+            "very-fast" to score(45.0, ms = 2000), "under-threshold" to score(9.9, ms = 1),
+        )))
+        assertEquals("minimum", RoutePolicy.ranked(mapOf("minimum" to score(10.0, ms = 2000), "below" to score(9.9, ms = 1))).first())
+    }
+
+    private fun score(down: Double, up: Double = 1.0, ms: Long = 30) = NodeSpeed(down, up, ms)
 }

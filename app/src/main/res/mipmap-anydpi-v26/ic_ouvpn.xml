@@ -1,0 +1,5 @@
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/ou_base" />
+    <foreground android:drawable="@drawable/ic_ouvpn_foreground" />
+    <monochrome android:drawable="@drawable/ic_ouvpn_status" />
+</adaptive-icon>

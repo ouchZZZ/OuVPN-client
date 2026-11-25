@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108" role="img" aria-labelledby="title">
+  <title id="title">ouVPN client: маршрут домой</title>
+  <rect x="0" y="0" width="108" height="108" rx="25" fill="#101a1b"/>
+  <circle cx="54" cy="54" r="28" fill="#1c3634" stroke="#325b51" stroke-width="1.25"/>
+  <path d="M36 53 54 37 72 53 M41 52v16h17 M68 53v9q0 6-6 6h-3q-5 0-5-5v-6h-7" fill="none" stroke="#82f1c0" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="47" cy="57" r="3.5" fill="#f1f9f5"/>
+</svg>

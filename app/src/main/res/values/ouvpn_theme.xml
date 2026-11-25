@@ -1,0 +1,21 @@
+<resources>
+    <color name="ou_base">#101A1B</color>
+    <color name="ou_panel">#1B2929</color>
+    <color name="ou_text">#F1F9F5</color>
+    <color name="ou_dim">#ABC1BA</color>
+    <color name="ou_mint">#82F1C0</color>
+    <color name="ou_warning">#FFD59C</color>
+    <style name="Theme.OuVpn" parent="Theme.MaterialComponents.NoActionBar">
+        <item name="colorPrimary">@color/ou_mint</item>
+        <item name="colorPrimaryVariant">@color/ou_panel</item>
+        <item name="colorOnPrimary">@color/ou_base</item>
+        <item name="colorSecondary">@color/ou_mint</item>
+        <item name="colorSurface">@color/ou_panel</item>
+        <item name="colorOnSurface">@color/ou_text</item>
+        <item name="android:colorBackground">@color/ou_base</item>
+        <item name="android:statusBarColor">@color/ou_base</item>
+        <item name="android:navigationBarColor">@color/ou_base</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>

@@ -1,0 +1,90 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.example.myvpn'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.example.myvpn'
+        minSdk 26
+        ndk { abiFilters 'arm64-v8a' }
+        targetSdk 34
+        versionCode 3
+        versionName '1.1.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        coreLibraryDesugaringEnabled true
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+
+    buildFeatures {
+        viewBinding true
+    }
+    sourceSets.main.jniLibs.srcDir "$buildDir/generated/singbox/jni"
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += ['**/libsingbox.so']
+        }
+    }
+}
+
+// Verified release archive; the executable is extracted by Android into nativeLibraryDir.
+def singBoxVersion = '1.14.4'
+def singBoxArchive = "sing-box-${singBoxVersion}-android-arm64.tar.gz"
+def singBoxSha256 = 'fb3a6c5197f4044f82c8fd75e01ce14c28b6abdd4c3df84bb987d41a962a320f'
+def singBoxRoot = layout.buildDirectory.dir('generated/singbox')
+def prepareSingBox = tasks.register('prepareSingBox') {
+    inputs.property('releaseSha256', singBoxSha256)
+    def exe = singBoxRoot.map { it.file('jni/arm64-v8a/libsingbox.so') }
+    outputs.file(exe)
+    doLast {
+        def dir = singBoxRoot.get().asFile
+        dir.mkdirs()
+        def archive = new File(dir, singBoxArchive)
+        if (!archive.exists()) {
+            ant.get(src: "https://github.com/SagerNet/sing-box/releases/download/v${singBoxVersion}/${singBoxArchive}", dest: archive, retries: 2)
+        }
+        def digest = java.security.MessageDigest.getInstance('SHA-256')
+        archive.withInputStream { input ->
+            byte[] buffer = new byte[65536]
+            for (int count = input.read(buffer); count > 0; count = input.read(buffer)) digest.update(buffer, 0, count)
+        }
+        if (digest.digest().encodeHex().toString() != singBoxSha256) {
+            throw new GradleException('sing-box archive checksum mismatch; remove the generated archive and retry.')
+        }
+        def binary = tarTree(resources.gzip(archive)).matching { include '**/sing-box' }.singleFile
+        def destination = exe.get().asFile
+        destination.parentFile.mkdirs()
+        java.nio.file.Files.copy(binary.toPath(), destination.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+    }
+}
+
+tasks.named('preBuild').configure { dependsOn(prepareSingBox) }
+
+dependencies {
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+    implementation 'com.wireguard.android:tunnel:1.0.20260102'
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+}

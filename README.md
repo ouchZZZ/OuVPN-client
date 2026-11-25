@@ -2,14 +2,16 @@
 
 # ouVPN client
 
-**Android-клиент для домашнего WireGuard.** Подключается напрямую, когда это удобно, или ищет рабочий путь до того же домашнего сервера через ноды VLESS/XUDP и Hysteria 2 из твоих подписок. Промежуточная нода доставляет пакеты до дома, а интернет для приложений в туннеле выходит через домашнее подключение.
+**Простой Android-клиент для VPN-подписок с автовыбором ноды по измеренной скорости скачивания, а не по пингу.** Поддерживает ноды VLESS/XUDP и Hysteria 2 и подключение к своему WireGuard-серверу поверх ноды из подписки.
+
+В текущей версии для подключения нужен WireGuard-конфиг: клиент сравнивает прямой маршрут и маршруты через ноды подписки. Режим подключения через ноду без WireGuard пока не слит в основную ветку.
 
 ```text
 Телефон ──────────────────────────────► домашний WireGuard ─► LAN / интернет
 Телефон ─► VLESS/XUDP или Hysteria 2 ─► домашний WireGuard ─► LAN / интернет
 ```
 
-> Это личный проект, не VPN-сервис и не официальный клиент Happ, WireGuard или sing-box. **Весь код приложения написал ChatGPT.** [@ouchZZZ](https://github.com/ouchZZZ) придумал сценарий, определял поведение и проверял приложение на своём телефоне. Сторонние движки написаны своими авторами.
+> Код приложения написал ChatGPT. Это экспериментальный клиент, а не VPN-сервис и не официальный клиент Happ, WireGuard или sing-box.
 
 ## Что умеет
 
@@ -31,7 +33,7 @@
 - Для выхода в интернет домашний WireGuard-сервер должен быть настроен как шлюз. Промежуточная нода должна пропускать UDP до его `Endpoint`. Доступность на каждой сети не гарантируется.
 - Это **не** системный Always-on VPN или kill switch. При активном системном туннеле клиент не включает прямой выход вместо потерянного маршрута; при отключении VPN или завершении его процесса Android может вернуть обычную маршрутизацию.
 - Подписки и кэш нод хранятся локально, в зашифрованном хранилище Android. При запросе подписки отправляется совместимый `User-Agent` Happ. С включённой регистрацией также отправляются стабильный ID **этого приложения**, модель и версия Android; провайдер может занять отдельный слот. Для замеров используется Cloudflare (`speed.cloudflare.com` и DNS-over-HTTPS в проверке через дом). В коде приложения нет собственной аналитики или сервера телеметрии.
-- На реальном телефоне автор проверил домашние сервисы, Immich и интернет. Это не означает проверку на всех моделях, прошивках и операторах.
+
 
 ## Сборка и тесты
 
@@ -49,8 +51,8 @@
 
 Лицензии компонентов — в [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Лицензия на собственный код проекта пока не выбрана; наличие исходников в GitHub само по себе не даёт разрешения на их распространение. Перед публичным выпуском APK см. [чек-лист релиза](docs/release-checklist.md).
 
-Для обычных багов подойдут [Issues](https://github.com/ouchZZZ/OuVPN-client/issues). Не прикладывай ссылки подписок, HWID, ключи, реальные адреса домашней сети или полные конфиги.
+Для обычных багов подойдёт вкладка Issues. Не прикладывай ссылки подписок, HWID, ключи, реальные адреса сети или полные конфиги.
 
 ---
 
-**English summary:** An experimental Android client for your own home WireGuard gateway. It can connect directly or choose a VLESS/XUDP or Hysteria 2 relay from your subscriptions based on end-to-end throughput through the home tunnel. Bring your own WireGuard configuration and, optionally, a subscription. All application code was written by ChatGPT; @ouchZZZ designed and tested the workflow.
+**English summary:** An Android client that ranks VPN subscription nodes by measured download speed, not ping. The current version connects to your own WireGuard server directly or through a VLESS/XUDP or Hysteria 2 subscription node. The application code was written by ChatGPT.

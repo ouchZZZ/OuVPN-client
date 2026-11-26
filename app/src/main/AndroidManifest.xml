@@ -35,11 +35,17 @@
             android:exported="false"
             android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Maintain the user's selected relay for their home WireGuard tunnel" />
+                android:value="Maintain the user's selected VPN connection through a proxy node or a home WireGuard tunnel" />
         </service>
 
         <service android:name=".SubscriptionRefreshJob" android:exported="true"
             android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <service android:name=".ProxyTunService" android:exported="false"
+            android:permission="android.permission.BIND_VPN_SERVICE">
+            <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />
+        </service>
 
         <service android:name="com.wireguard.android.backend.GoBackend$VpnService">
             <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />

@@ -19,9 +19,11 @@ import kotlinx.coroutines.flow.asStateFlow
 
 class MyVpnService : Service() {
     internal enum class Mode { AUTO, MANUAL, TEST }
-    internal class Selection(val config: Config, val mode: Mode, val route: HomeRoute? = null, val excluded: Set<String> = emptySet())
+    internal class Selection(val config: Config?, val mode: Mode, val route: HomeRoute? = null, val excluded: Set<String> = emptySet()) {
+        val egress get() = if (config == null) EgressMode.NODE else EgressMode.HOME
+    }
     internal data class Status(val active: Boolean, val text: String, val busy: Boolean = false,
-        val mode: Mode? = null, val routeKey: String? = null)
+        val mode: Mode? = null, val routeKey: String? = null, val egress: EgressMode = EgressMode.HOME)
 
     companion object {
         private const val CHANNEL = "home_wireguard"
@@ -29,14 +31,14 @@ class MyVpnService : Service() {
         internal const val CHECK = "com.example.myvpn.CHECK"
         private val mutableStatus = MutableStateFlow(Status(false, "VPN отключён"))
         internal val status = mutableStatus.asStateFlow()
-        private val mutableReport = MutableStateFlow(RouteReport())
+        private val mutableReport = MutableStateFlow<RouteReport?>(null)
         internal val report = mutableReport.asStateFlow()
         @Volatile internal var selection: Selection? = null
     }
 
     private val worker = Executors.newSingleThreadScheduledExecutor()
     private val connectivity by lazy { getSystemService(ConnectivityManager::class.java) }
-    private val session by lazy { VpnSession(this, ::publish, { mutableReport.value = it }, { stopSelf() }) }
+    private var session: VpnController? = null
     @Volatile private var stopping = false
     @Volatile private var operation: java.util.concurrent.Future<*>? = null
     private var networkWork: ScheduledFuture<*>? = null
@@ -50,13 +52,13 @@ class MyVpnService : Service() {
     @Synchronized private fun queueNetworkCheck() {
         if (stopping) return
         networkWork?.cancel(false)
-        networkWork = worker.schedule({ if (!stopping) session.onNetworkChanged() }, 1_200, TimeUnit.MILLISECONDS)
+        networkWork = worker.schedule({ if (!stopping) session?.onNetworkChanged() }, 1_200, TimeUnit.MILLISECONDS)
     }
 
     override fun onCreate() {
         super.onCreate()
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL, "Домашний WireGuard", NotificationManager.IMPORTANCE_LOW),
+            NotificationChannel(CHANNEL, "Подключение ouVPN", NotificationManager.IMPORTANCE_LOW),
         )
     }
 
@@ -67,21 +69,34 @@ class MyVpnService : Service() {
         }
         val fullCheck = intent?.action == CHECK
         val request = if (fullCheck) null else selection.also { selection = null }
-        if (!fullCheck && request == null) {
+        if ((!fullCheck && request == null) || (fullCheck && !mutableStatus.value.active)) {
             if (!monitoring) stopSelf()
             return START_NOT_STICKY
         }
         if (operation?.isDone == false || mutableStatus.value.busy) return START_NOT_STICKY
-        val pending = mutableStatus.value.copy(busy = true, text = if (fullCheck || request?.mode == Mode.TEST)
-            "Готовим полную проверку…" else "Готовим WireGuard…")
+        val egress = request?.egress ?: mutableStatus.value.egress
+        if (mutableStatus.value.active && egress != mutableStatus.value.egress) return START_NOT_STICKY
+        val pending = mutableStatus.value.copy(busy = true, egress = egress, text = if (fullCheck || request?.mode == Mode.TEST)
+            "Готовим полную проверку…" else if (egress == EgressMode.HOME) "Готовим WireGuard…" else "Готовим подключение через ноду…")
         mutableStatus.value = pending
         startForeground(1, notification(pending.text))
         if (!monitoring) {
             monitoring = true
             connectivity.registerDefaultNetworkCallback(networkEvents)
-            worker.scheduleWithFixedDelay({ if (!stopping) session.health() }, 2, 2, TimeUnit.SECONDS)
+            worker.scheduleWithFixedDelay({ if (!stopping) session?.health() }, 2, 2, TimeUnit.SECONDS)
         }
-        operation = worker.submit { if (!stopping) session.run(request, fullCheck) }
+        operation = worker.submit {
+            if (!stopping) {
+                val updateReport: (RouteReport) -> Unit = { latest ->
+                    mutableReport.value = runCatching { SavedVpnState.saveReport(this, request?.config, latest) }.getOrDefault(latest)
+                }
+                val controller = session ?: when (egress) {
+                    EgressMode.HOME -> VpnSession(this, ::publish, updateReport, ::stopSelf)
+                    EgressMode.NODE -> ProxyOnlySession(this, ::publish, updateReport, ::stopSelf)
+                }.also { session = it }
+                controller.run(request, fullCheck)
+            }
+        }
         return START_NOT_STICKY
     }
 
@@ -100,7 +115,7 @@ class MyVpnService : Service() {
         Thread({
             // Wait for the interrupted worker before releasing the same tunnel/relay it was operating on.
             while (!worker.awaitTermination(5, TimeUnit.SECONDS)) { /* bounded network reads can outlive interruption */ }
-            runCatching { session.close() }
+            runCatching { session?.close() }
             if (mutableStatus.value.active || mutableStatus.value.busy) mutableStatus.value = Status(false, "VPN отключён")
         }, "ouvpn-close").start()
         super.onDestroy()

@@ -42,5 +42,16 @@ jobs:
           tar -xzf "$RUNNER_TEMP/$file" -C "$RUNNER_TEMP"
           printf 'SING_BOX_TEST_BINARY=%s\n' "$RUNNER_TEMP/sing-box-1.14.4-linux-amd64/sing-box" >> "$GITHUB_ENV"
 
+      - name: Set up Go for the Android TUN engine
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.26.10'
+          cache: false
+
+      - name: Exercise descriptor handoff on Linux
+        run: |
+          python3 native/direct-tun/build.py "$RUNNER_TEMP/ouvpn-engine" --linux-test
+          python3 native/direct-tun/test_handoff.py "$RUNNER_TEMP/ouvpn-engine" -v
+
       - name: Run tests and assemble the debug APK
         run: ./gradlew --no-daemon :app:testDebugUnitTest :app:assembleDebug

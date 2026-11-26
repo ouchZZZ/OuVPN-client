@@ -3,9 +3,6 @@ package com.example.myvpn
 import android.content.Context
 import com.wireguard.config.Config
 import java.net.InetSocketAddress
-import java.util.concurrent.Callable
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 internal data class HomeRoute(val node: ProxyNode? = null) {
     val key: String get() = node?.link ?: DIRECT
@@ -18,6 +15,7 @@ internal data class RouteReport(
     val outer: Map<String, NodeSpeed?> = emptyMap(),
     val home: Map<String, NodeSpeed?> = emptyMap(),
     val best: HomeRoute? = null,
+    val egress: EgressMode = EgressMode.HOME,
 )
 
 internal class RouteTester(private val context: Context, config: Config) {
@@ -27,12 +25,14 @@ internal class RouteTester(private val context: Context, config: Config) {
     val spec = SingBoxConfig.HomeProbe(endpoint.host, endpoint.port, iface.addresses.map { it.toString() },
         iface.keyPair.privateKey.toBase64(), peer.publicKey.toBase64(), peer.preSharedKey.orElse(null)?.toBase64(), iface.mtu.orElse(1280))
 
-    fun home(route: HomeRoute, light: Boolean = false): NodeSpeed? = attempt { SpeedCheck.home(context, spec, route.node, light) }
+    fun home(route: HomeRoute, light: Boolean = false, includeUpload: Boolean = false): NodeSpeed? =
+        attempt { SpeedCheck.home(context, spec, route.node, light, includeUpload) }
 
     fun scan(
         nodes: List<ProxyNode>, wifi: Boolean, exhaustive: Boolean,
         sampleHome: (HomeRoute) -> NodeSpeed?, progress: (String) -> Unit,
         knownDirect: Pair<HomeRoute, NodeSpeed?>? = null,
+        includeUpload: Boolean = false,
     ): RouteReport {
         val direct = HomeRoute()
         val home = linkedMapOf<String, NodeSpeed?>()
@@ -42,39 +42,22 @@ internal class RouteTester(private val context: Context, config: Config) {
             if (RoutePolicy.fastDirect(wifi, exhaustive, home[direct.key])) return RouteReport(home = home, best = direct)
         }
 
-        val candidates = nodes.distinctBy { it.link }
-        val labels = candidates.associateBy { it.link }
-        val pings = linkedMapOf<String, Long?>()
-        val pool = Executors.newFixedThreadPool(RoutePolicy.QUICK_PARALLELISM)
-        try {
-            for (batch in candidates.chunked(RoutePolicy.QUICK_PARALLELISM)) {
-                interrupted()
-                progress("Проверяем ноды · ${pings.size}/${candidates.size}")
-                val futures = pool.invokeAll(batch.map { node -> Callable { SpeedCheck.quick(context, node) } },
-                    RoutePolicy.QUICK_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-                batch.zip(futures).forEach { (node, result) -> pings[node.link] = runCatching { result.get() }.getOrNull() }
-            }
-        } finally { pool.shutdownNow() }
-        val alive = candidates.filter { pings[it.link] != null }
-        val outer = linkedMapOf<String, NodeSpeed?>()
-        alive.forEachIndexed { index, node ->
-            interrupted()
-            progress("Замер нод · ${index + 1}/${alive.size}")
-            outer[node.link] = attempt { SpeedCheck.measure(context, node) }
-        }
+        val labels = nodes.associateBy { it.link }
+        val survey = NodeSurvey.run(context, nodes, progress, includeUpload)
+        val outer = survey.outer
         if (!home.containsKey(direct.key)) {
             progress("Проверяем прямой WireGuard…")
             home[direct.key] = sampleHome(direct)
         }
         val short = RoutePolicy.shortlist(outer.mapNotNull { (key, speed) -> speed?.let { key to it } }.toMap())
         short.forEachIndexed { index, key ->
-            interrupted()
+            NodeSurvey.interrupted()
             progress("Замер через WireGuard · ${index + 1}/${short.size}")
             home[key] = sampleHome(HomeRoute(labels.getValue(key)))
         }
         val best = RoutePolicy.ranked(home.mapNotNull { (key, speed) -> speed?.let { key to it } }.toMap()).firstOrNull()
             ?.let { HomeRoute(labels[it]) }
-        return RouteReport(pings, outer, home, best)
+        return RouteReport(survey.ping, outer, home, best)
     }
 
     fun transport(route: HomeRoute): RouteTransport = if (route.node == null) {

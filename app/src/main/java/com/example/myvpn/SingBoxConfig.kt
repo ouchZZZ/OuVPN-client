@@ -5,14 +5,44 @@ import org.json.JSONObject
 
 internal object SingBoxConfig {
     const val BENCHMARK = "speed.cloudflare.com"
+    const val TUN_IPV4 = "198.18.0.1"
+    const val TUN_IPV4_PREFIX = 30
+    const val TUN_IPV6 = "fd73:6f75:7670::1"
+    const val TUN_IPV6_PREFIX = 126
+    const val TUN_MTU = 1280
 
     fun relay(node: ProxyNode, port: Int, target: String, targetPort: Int): String = build(node,
         JSONObject().put("type", "direct").put("network", "udp")
             .put("override_address", target).put("override_port", targetPort), port, null)
 
-    fun probe(node: ProxyNode, port: Int): String = build(node, JSONObject().put("type", "mixed"), port,
+    fun probe(node: ProxyNode, port: Int, serverAddress: String = node.host): String = build(node, JSONObject().put("type", "mixed"), port,
         JSONArray().put(JSONObject().put("domain", BENCHMARK).put("action", "route").put("outbound", "node"))
-            .put(JSONObject().put("action", "reject")))
+            .put(JSONObject().put("action", "reject")), serverAddress)
+
+    fun supportsNodeTunnel(node: ProxyNode): Boolean = encryptedNode(node) &&
+        try { outbound(node); true } catch (_: IllegalArgumentException) { false }
+
+    private fun encryptedNode(node: ProxyNode): Boolean = when (node.protocol) {
+        "hysteria2" -> true
+        "vless" -> node.options["security"] in setOf("tls", "reality")
+        else -> false
+    }
+
+    fun nodeTunnel(node: ProxyNode, serverAddress: String? = null): String {
+        require(encryptedNode(node)) { "Для подключения без WireGuard требуется шифрование ноды." }
+        val servers = JSONArray()
+        if (serverAddress == null) servers.put(JSONObject().put("type", "local").put("tag", "bootstrap"))
+        servers.put(JSONObject().put("type", "https").put("tag", "inside").put("server", "1.1.1.1").put("detour", "node"))
+        val dns = JSONObject().put("final", "inside").put("servers", servers)
+        val inbound = JSONObject().put("type", "tun").put("stack", "gvisor").put("auto_route", false)
+            .put("mtu", TUN_MTU).put("address", JSONArray(listOf("$TUN_IPV4/$TUN_IPV4_PREFIX", "$TUN_IPV6/$TUN_IPV6_PREFIX")))
+        val route = JSONObject().put("final", "node")
+            .put("rules", JSONArray().put(JSONObject().put("port", 53).put("action", "hijack-dns")))
+        if (serverAddress == null) route.put("default_domain_resolver", "bootstrap")
+        return JSONObject().put("log", JSONObject().put("disabled", true)).put("dns", dns)
+            .put("inbounds", JSONArray().put(inbound)).put("outbounds", JSONArray().put(outbound(node, serverAddress ?: node.host)))
+            .put("route", route).toString()
+    }
 
     internal class HomeProbe(
         val host: String, val port: Int, val addresses: List<String>, val privateKey: String,
@@ -41,20 +71,20 @@ internal object SingBoxConfig {
             .put("route", route).toString()
     }
 
-    private fun build(node: ProxyNode, inbound: JSONObject, port: Int, rules: JSONArray?): String {
+    private fun build(node: ProxyNode, inbound: JSONObject, port: Int, rules: JSONArray?, serverAddress: String = node.host): String {
         require(port in 1..65535)
         val route = JSONObject().put("final", "node").put("default_domain_resolver", "bootstrap")
         rules?.let { route.put("rules", it) }
         return JSONObject().put("log", JSONObject().put("disabled", true))
             .put("dns", JSONObject().put("servers", JSONArray().put(JSONObject().put("type", "local").put("tag", "bootstrap"))))
             .put("inbounds", JSONArray().put(inbound.put("listen", "127.0.0.1").put("listen_port", port)))
-            .put("outbounds", JSONArray().put(outbound(node)))
+            .put("outbounds", JSONArray().put(outbound(node, serverAddress)))
             .put("route", route).toString()
     }
 
-    private fun outbound(node: ProxyNode): JSONObject {
+    private fun outbound(node: ProxyNode, serverAddress: String = node.host): JSONObject {
         val options = node.options
-        val out = JSONObject().put("type", node.protocol).put("tag", "node").put("server", node.host).put("server_port", node.port)
+        val out = JSONObject().put("type", node.protocol).put("tag", "node").put("server", serverAddress).put("server_port", node.port)
         val security = options["security"].orEmpty()
         val tls = JSONObject().put("enabled", true).put("server_name", options["sni"]?.takeIf { it.isNotBlank() } ?: node.host)
         options["alpn"]?.takeIf { it.isNotBlank() }?.let { tls.put("alpn", JSONArray(it.split(','))) }

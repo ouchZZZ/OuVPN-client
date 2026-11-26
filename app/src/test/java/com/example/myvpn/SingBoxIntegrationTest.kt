@@ -81,6 +81,20 @@ class SingBoxIntegrationTest {
         }
     }
 
+    @Test fun singBoxAcceptsDirectTunConfig() {
+        val executable = binary
+        assumeTrue("Set SING_BOX_TEST_BINARY to sing-box 1.14.4", executable?.isFile == true)
+        checkNotNull(executable)
+        val node = SubscriptionParser.parse("vless://$uuid@127.0.0.1:443?security=tls").single()
+        val process = run(executable, "check", SingBoxConfig.nodeTunnel(node))
+        try {
+            assertTrue(process.waitFor(5, TimeUnit.SECONDS))
+            assertEquals(process.inputStream.bufferedReader().readText(), 0, process.exitValue())
+        } finally {
+            process.destroyForcibly()
+        }
+    }
+
     private fun run(executable: File, action: String, config: String): Process =
         ProcessBuilder(executable.absolutePath, action, "-c", "stdin", "--disable-color").redirectErrorStream(true)
             .start().also { process -> process.outputStream.bufferedWriter().use { it.write(config) } }

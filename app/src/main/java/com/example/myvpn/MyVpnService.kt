@@ -47,6 +47,8 @@ class MyVpnService : Service() {
         override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
             if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) queueNetworkCheck()
         }
+
+        override fun onLost(network: Network) = queueNetworkCheck()
     }
 
     @Synchronized private fun queueNetworkCheck() {

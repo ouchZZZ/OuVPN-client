@@ -10,9 +10,6 @@ internal object RoutePolicy {
     fun fastDirect(wifi: Boolean, exhaustive: Boolean, speed: NodeSpeed?): Boolean =
         wifi && !exhaustive && speed != null && speed.downloadMbps >= DIRECT_WIFI_MBPS
 
-    fun needsReselection(first: NodeSpeed?, repeat: NodeSpeed?): Boolean =
-        first == null || (first.downloadMbps < SLOW_MBPS && (repeat == null || repeat.downloadMbps < SLOW_MBPS))
-
     fun <T> shortlist(scores: Map<T, NodeSpeed>): List<T> = ranked(scores).take(HOME_CANDIDATES)
 
     fun <T> ranked(scores: Map<T, NodeSpeed>): List<T> = scores.entries.sortedWith(

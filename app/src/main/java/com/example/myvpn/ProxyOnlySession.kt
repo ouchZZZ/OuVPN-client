@@ -1,9 +1,6 @@
 package com.example.myvpn
 
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.Network
-import android.os.SystemClock
 
 
 /** Plain subscription-node mode: do not instantiate WireGuard or read its profile. */
@@ -13,14 +10,11 @@ internal class ProxyOnlySession(
     private val report: (RouteReport) -> Unit,
     private val stop: () -> Unit,
 ) : VpnController {
-    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     private var tun: ProxyTun? = null
     private var core: DirectTunProcess? = null
     private var current: ProxyNode? = null
     private var pinned: ProxyNode? = null
     private var mode = MyVpnService.Mode.AUTO
-    private var network: Network? = null
-    private var nextTest = 0L
     private var notice: String? = null
 
     override fun run(request: MyVpnService.Selection?, fullCheck: Boolean) = guarded {
@@ -48,7 +42,6 @@ internal class ProxyOnlySession(
                 return@guarded
             }
             tun = ProxyTunService.open(context, request.excluded, stop)
-            network = connectivity.activeNetwork
         }
         mode = request.mode
         pinned = request.route?.node.takeIf { mode == MyVpnService.Mode.MANUAL }
@@ -57,64 +50,12 @@ internal class ProxyOnlySession(
         status()
     }
 
-    override fun onNetworkChanged() {
-        if (tun == null) return
-        val available = connectivity.activeNetwork ?: return
-        if (available == network) return
-        network = available
-        guarded {
-            if (mode == MyVpnService.Mode.MANUAL) {
-                pinned?.let(::activate)
-            } else {
-                checkCurrent()
-            }
-            status()
-        }
-    }
-
     override fun health() {
-        if (tun == null) return
-        if (core != null && !alive()) {
+        if (tun != null && core != null && !alive()) {
             pause()
-            status()
-            nextTest = SystemClock.elapsedRealtime()
-        }
-        if (connectivity.activeNetwork == null) return
-        if (SystemClock.elapsedRealtime() < nextTest) return
-        guarded {
-            if (mode == MyVpnService.Mode.MANUAL) {
-                if (alive() && NodeSurvey.attempt { verifyActive(); true } == true) {
-                    nextTest = SystemClock.elapsedRealtime() + 180_000
-                } else {
-                    pause()
-                    pinned?.let(::activate)
-                }
-            } else checkCurrent()
             status()
         }
     }
-
-    private fun checkCurrent() {
-        val active = current
-        if (active == null || !alive()) { choose(); return }
-        busy("Проверяем текущую ноду…")
-        if (NodeSurvey.attempt { verifyActive(); true } != true) {
-            pause()
-            choose()
-            return
-        }
-        val first = NodeSurvey.attempt { SpeedCheck.measure(context, active, light = true) }
-        val second = first?.takeIf { it.downloadMbps < RoutePolicy.SLOW_MBPS }
-            ?.let { NodeSurvey.attempt { SpeedCheck.measure(context, active, light = true) } }
-        if (RoutePolicy.needsReselection(first, second)) {
-            choose(active.takeIf { first != null || second != null })
-        } else {
-            if (network != null && coreNetwork != network) activate(active)
-            nextTest = SystemClock.elapsedRealtime() + 180_000
-        }
-    }
-
-    private var coreNetwork: Network? = null
 
     private fun nodes() = SubscriptionRepository.list(context).flatMap { it.namedNodes() }
         .filter(SingBoxConfig::supportsNodeTunnel).distinctBy { it.link }
@@ -139,22 +80,19 @@ internal class ProxyOnlySession(
         }, { choose(); current })
     }
 
-    private fun choose(fallback: ProxyNode? = null) {
-        nextTest = SystemClock.elapsedRealtime() + 90_000
+    private fun choose() {
         notice = null
         busy("Ищем рабочую ноду…")
         val (outcome, nodes) = scan()
         val speeds = outcome.outer.mapNotNull { (key, score) -> score?.let { key to it } }.toMap()
-        val candidates = RoutePolicy.ranked(speeds).mapNotNull(nodes::get) + listOfNotNull(fallback)
-        for (node in candidates.distinctBy { it.link }) {
+        val candidates = RoutePolicy.ranked(speeds).mapNotNull(nodes::get)
+        for (node in candidates) {
             if (NodeSurvey.attempt { activate(node); true } == true) {
-                if (node == fallback || speeds[node.link]?.downloadMbps?.let { it < RoutePolicy.SLOW_MBPS } == true) notice = "Ниже 1 Мбит/с"
+                if (speeds[node.link]?.downloadMbps?.let { it < RoutePolicy.SLOW_MBPS } == true) notice = "Ниже 1 Мбит/с"
                 return
             }
         }
         pause()
-        current = null
-        nextTest = SystemClock.elapsedRealtime() + 90_000
     }
 
     private fun activate(node: ProxyNode) {
@@ -171,8 +109,6 @@ internal class ProxyOnlySession(
             throw e
         }
         current = node
-        coreNetwork = connectivity.activeNetwork
-        nextTest = SystemClock.elapsedRealtime() + 180_000
     }
 
     private fun pause() {
@@ -214,7 +150,6 @@ internal class ProxyOnlySession(
                 publish(MyVpnService.Status(false, checkNotNull(notice), egress = EgressMode.NODE))
                 stop()
             } else {
-                nextTest = SystemClock.elapsedRealtime() + 90_000
                 status()
             }
         }

@@ -45,6 +45,6 @@ internal object NodeSurvey {
 
 internal interface VpnController : AutoCloseable {
     fun run(request: MyVpnService.Selection?, fullCheck: Boolean)
-    fun onNetworkChanged()
+    fun onNetworkChanged() = Unit
     fun health()
 }

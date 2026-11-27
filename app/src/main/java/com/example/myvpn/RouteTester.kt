@@ -31,14 +31,13 @@ internal class RouteTester(private val context: Context, config: Config) {
     fun scan(
         nodes: List<ProxyNode>, wifi: Boolean, exhaustive: Boolean,
         sampleHome: (HomeRoute) -> NodeSpeed?, progress: (String) -> Unit,
-        knownDirect: Pair<HomeRoute, NodeSpeed?>? = null,
         includeUpload: Boolean = false,
     ): RouteReport {
         val direct = HomeRoute()
         val home = linkedMapOf<String, NodeSpeed?>()
-        if (wifi || knownDirect != null) {
+        if (wifi) {
             progress("Проверяем прямой WireGuard…")
-            home[direct.key] = if (knownDirect != null) knownDirect.second else sampleHome(direct)
+            home[direct.key] = sampleHome(direct)
             if (RoutePolicy.fastDirect(wifi, exhaustive, home[direct.key])) return RouteReport(home = home, best = direct)
         }
 

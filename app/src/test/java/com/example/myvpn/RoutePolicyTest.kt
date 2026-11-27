@@ -13,13 +13,6 @@ class RoutePolicyTest {
         assertFalse(RoutePolicy.fastDirect(wifi = true, exhaustive = false, speed = score(9.9)))
     }
 
-    @Test fun slowRouteMustFailTheThresholdTwiceButMissingConnectivityDoesNotNeedARepeat() {
-        assertTrue(RoutePolicy.needsReselection(null, null))
-        assertFalse(RoutePolicy.needsReselection(score(0.9), score(1.0)))
-        assertTrue(RoutePolicy.needsReselection(score(0.9), score(0.8)))
-        assertFalse(RoutePolicy.needsReselection(score(1.0), null))
-    }
-
     @Test fun candidateLimitCountsNodesSeparatelyFromTheDirectRoute() {
         val candidates = (1..8).associateWith { score(it.toDouble()) }
         assertEquals(listOf(8, 7, 6, 5, 4), RoutePolicy.shortlist(candidates))

@@ -2,7 +2,6 @@ package com.example.myvpn
 
 import android.content.Context
 import android.net.ConnectivityManager
-import android.net.Network
 import android.net.NetworkCapabilities
 import android.os.SystemClock
 import com.wireguard.android.backend.GoBackend
@@ -26,8 +25,7 @@ internal class VpnSession(
     private var switchedAtWall = 0L
     private var tester: RouteTester? = null
     private var mode = MyVpnService.Mode.TEST
-    private var network: Network? = null
-    private var retryAfter = 0L
+    private var network: WifiHandover.NetworkState? = null
     private var routeAt = 0L
     private var lastNotice: String? = null
     private var peer: Peer? = null
@@ -109,51 +107,56 @@ internal class VpnSession(
             relay = local
             tester = probe
             imported = input
-            network = connectivity.activeNetwork
+            network = underlyingNetwork()
         } catch (error: Exception) { local.close(); throw error }
     }
 
     override fun onNetworkChanged() {
-        if (relay == null) return
-        val current = connectivity.activeNetwork ?: return
-        if (network == current) return
+        val local = relay ?: return
+        // No probes without a usable underlying network. Keep the last snapshot until one returns.
+        val current = underlyingNetwork() ?: return
+        val previous = network
         network = current
-        val previous = connected
+        if (mode != MyVpnService.Mode.AUTO || !current.changedWifiFrom(previous)) return
+
+        val probe = checkNotNull(tester)
+        val original = connected
+        val originalTransport = transport
         try {
-            if (mode == MyVpnService.Mode.MANUAL) {
-                pinned?.let(::restore) // New transport, same manually pinned route.
-                stable()
-                return
-            }
-            if (previous == null) { choose(); return }
-            var knownDirect: Pair<HomeRoute, NodeSpeed?>? = null
-            if (isWifi()) {
-                val direct = HomeRoute()
-                show("Wi‑Fi: проверяем прямой WireGuard…", true)
-                val measured = sample(direct)
-                knownDirect = direct to measured
-                if (RoutePolicy.fastDirect(wifi = true, exhaustive = false, speed = measured)) {
-                    restore(direct); stable(); return
+            val candidate = original?.takeIf { it.node != null } ?: bestKnownNode()
+            show("Wi‑Fi изменился: сравниваем маршруты WireGuard…", true)
+            // The probe uses the same WireGuard key. Pause traffic without tearing down the active transport.
+            local.route(null)
+            try {
+                val result = WifiHandover.compare(original, candidate) { probe.home(it) }
+                val winner = result.best
+                if (underlyingNetwork() == current && winner != null) {
+                    if (winner.key != original?.key) restore(winner)
+                    lastNotice = result.home[winner.key]?.takeIf { it.downloadMbps < RoutePolicy.SLOW_MBPS }
+                        ?.let { "Ниже 1 Мбит/с" }
+                }
+            } finally {
+                // Use a fresh UDP socket on the new network, but keep the same route/core if it wasn't replaced.
+                if (originalTransport != null && transport === originalTransport && !Thread.currentThread().isInterrupted) {
+                    local.route(originalTransport.address)
                 }
             }
-            show("Сеть изменилась: проверяем текущий маршрут…", true)
-            val first = if (previous.node == null && knownDirect != null) knownDirect.second else sample(previous, light = true)
-            val second = first?.takeIf { it.downloadMbps < RoutePolicy.SLOW_MBPS }?.let { sample(previous, light = true) }
-            if (RoutePolicy.needsReselection(first, second)) choose(knownDirect)
-            else { restore(previous); stable() }
         } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
-        catch (_: Exception) { stable() }
+        catch (_: Exception) { lastNotice = "Не удалось сравнить маршруты WireGuard" }
+        stable()
+    }
+
+    private fun bestKnownNode(): HomeRoute? {
+        val config = checkNotNull(imported)
+        val history = runCatching { SavedVpnState.loadReport(context, config) }.getOrNull() ?: return null
+        val nodes = SubscriptionRepository.list(context).flatMap { it.namedNodes() }
+        return RouteHistory.best(history.copy(home = history.home - HomeRoute.DIRECT), nodes, EgressMode.HOME)
     }
 
     override fun health() {
         if (relay == null) return
         if (backend.getState(tunnel) != Tunnel.State.UP) { stop(); return }
-        val age = SystemClock.elapsedRealtime() - routeAt
-        val stale = connected == null || transport?.alive != true || (age > 35_000 && !confirmed())
-        if (mode == MyVpnService.Mode.AUTO && stale && SystemClock.elapsedRealtime() >= retryAfter) {
-            try { choose() } catch (e: InterruptedException) { Thread.currentThread().interrupt() }
-            catch (_: Exception) { stable() }
-        } else stable()
+        stable()
     }
 
     private fun connectAuto() {
@@ -167,19 +170,16 @@ internal class VpnSession(
             val ready = speed != null && speed.downloadMbps >= RoutePolicy.SLOW_MBPS &&
                 NodeSurvey.attempt { restore(route); true } == true
             if (ready) {
-                retryAfter = SystemClock.elapsedRealtime() + 90_000
                 stable()
             } else {
                 report(RouteReport(home = mapOf(route.key to null)))
             }
             ready
-        }, { choose(exhaustive = true); connected })
+        }, { choose(); connected })
     }
 
-    private fun choose(knownDirect: Pair<HomeRoute, NodeSpeed?>? = null, exhaustive: Boolean = false) {
-        retryAfter = SystemClock.elapsedRealtime() + 90_000
-        val outcome = try { scan(checkNotNull(tester), exhaustive, knownDirect) }
-            finally { retryAfter = SystemClock.elapsedRealtime() + 90_000 }
+    private fun choose() {
+        val outcome = scan(checkNotNull(tester), exhaustive = true)
         val best = outcome.best
         if (best == null) {
             suspendPackets()
@@ -191,13 +191,13 @@ internal class VpnSession(
         stable()
     }
 
-    private fun scan(probe: RouteTester, exhaustive: Boolean, knownDirect: Pair<HomeRoute, NodeSpeed?>? = null, includeUpload: Boolean = false): RouteReport {
+    private fun scan(probe: RouteTester, exhaustive: Boolean, includeUpload: Boolean = false): RouteReport {
         var paused = false
         val nodes = SubscriptionRepository.list(context).flatMap { it.namedNodes() }
         val result = probe.scan(nodes, isWifi(), exhaustive, { route ->
             if (!paused) { suspendPackets(); paused = true }
             probe.home(route, includeUpload = includeUpload)
-        }, { text -> show(text, true) }, knownDirect, includeUpload)
+        }, { text -> show(text, true) }, includeUpload)
         report(result)
         return result
     }
@@ -257,8 +257,14 @@ internal class VpnSession(
         publish(MyVpnService.Status(relay != null, description, busy, if (relay != null) mode else null, current?.key))
     }
 
-    private fun isWifi(): Boolean = connectivity.getNetworkCapabilities(connectivity.activeNetwork)
-        ?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true
+    private fun isWifi(): Boolean = underlyingNetwork()?.wifi == true
+
+    private fun underlyingNetwork(): WifiHandover.NetworkState? {
+        val active = connectivity.activeNetwork ?: return null
+        val capabilities = connectivity.getNetworkCapabilities(active) ?: return null
+        if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return null
+        return WifiHandover.NetworkState(active.networkHandle, capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI))
+    }
 
     override fun close() {
         suspendPackets()
